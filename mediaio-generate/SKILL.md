@@ -1,323 +1,382 @@
 ---
-version: 0.12.0
 name: mediaio-generate
+metadata:
+  version: "0.2.6"
 description: |
-  Generate images/videos/3D assets/audio via Media.io AI. Defaults:
-  GPT Image 2 for image/design/text, Seedance 2.0 for
-  video, Nano Banana 2/Lite/Pro for character/reference
-  images, Marketing Studio for ads, Seed Audio 1.0 for audio.
-  Use when: "generate an image", "make a video", "animate
-  this photo", "image-to-video", "edit/stylize/remix this
-  image", "reframe this video", "edit this video from a
-  sketch", "create a 3D model/GLB", "create a sound effect",
-  "make music", "text-to-audio", "create an ad", "make a UGC
-  video", "unboxing", "presenter video", "import product from
-  URL", or "analyze video virality". Supports image-to-3D
-  (`multi_image_to_3d`),
-  text-to-audio/music (`seed_audio`), workflow generation
-  (`draw_to_video`, `reframe`), Marketing Studio, and
-  Virality Predictor (`brain_activity`).
-  Chain with mediaio-soul-id for face/identity consistency.
-  NOT for: Soul training, photoshoots, cards, explainers (use
-  mediaio-video-explainer), playable games/assets (use
-  mediaio-game-generation), or TTS.
-argument-hint: "[prompt-or-analysis-request] [--model <name>] [--image|--video <path-or-id>]"
-allowed-tools: Bash
+  Generate images and videos through the currently installed Media.io CLI.
+  Use for text-to-image, image-to-image, text-to-video, image-to-video,
+  reference-to-video and published workflows.
+  Select the model from the bundled static catalog
+  (`references/model-catalog.md`), which is generated from the production
+  registry; only fall back to `mediaio model list` on the triggers listed in
+  the discovery guardrail. Copy every `job_type` byte for byte — some contain
+  a literal space, and display names often do not match the identifier.
+  Effects may be used only when their parameters have been independently
+  verified because the current CLI exposes `effect list` but not `effect get`.
+  Always confirm the parameter schema with `model get` before submission.
+  Submitting spends the user's credits, but the CLI stays quiet about the
+  amount unless asked; surface the cost with `--show-credit`, and get an
+  explicit approval first, only when the user is cost-sensitive or has raised
+  credits, price or balance. When the balance runs short, or the user wants
+  their task history or their uploaded files, hand over the product-page link
+  printed by `mediaio link get` — never write or edit a media.io URL yourself.
+  Use the human-readable discovery output, upload local files before
+  generation, submit with `generate create`, wait with the separate
+  `generate wait` command, and retrieve result files with `generate download`
+  instead of reproducing signed result URLs.
+  On hosts that sandbox local command networking, the first networked
+  `mediaio` or `curl` Shell/Bash tool call must request host approval before process
+  launch. Never probe network availability by running it in the default sandbox.
 ---
 
 # Media.io Generate
 
-Submit jobs to any Media.io model. Wraps the `mediaio` CLI. Covers generic image/video/3D/audio generation, Marketing Studio (branded ads, avatars, products, hooks, settings), and, secondarily, Virality Predictor video scoring.
+Submit image and video jobs through the current `mediaio` CLI contract. Treat CLI help, model/workflow/effect discovery, and `model get`/`workflow get` output as the source of truth.
 
 ## Step 0 — Bootstrap
 
-Before any other command:
+Before any generation command:
 
-1. If `mediaio` is not on `$PATH`, install it:
-   ```bash
-   curl -fsSL https://raw.githubusercontent.com/media-io/cli/main/install.sh | sh
-   ```
-2. If `mediaio account status` fails with `Session expired` / `Not authenticated`, run `mediaio auth login` and complete the sign-in in the browser it opens and wait for confirmation.
+1. Run `command -v mediaio` and `mediaio version`. If the command is missing, tell the user that the shared Media.io CLI must be installed; do not silently install a second runtime from this skill.
+   - If `mediaio version` prints an `Update:` line ending with `(update available)`, treat that as a required handoff point: quote that line and ask whether to run `mediaio upgrade --output json` before continuing.
+   - The hint is throttled to once every 24 hours, so its absence means "no new hint today", not "confirmed current". Do not present the absence of a hint as proof that the install is up to date. `mediaio upgrade` is the only unthrottled check, but it also performs the upgrade, so do not run it just to probe.
+   - Use a blocking confirmation prompt in the same turn, such as: `mediaio reports an update: <Update: line>. Upgrade now?`
 
+   - Do not continue with discovery, generation, upload, or wait until the user answers whether to upgrade.
+   - If the user says yes, run `mediaio upgrade --output json` and judge only the standard JSON envelope: `schema_version`, `command`, `data`, and `error`.
+     - A non-zero exit code, or a top-level `error`, means the upgrade failed. Surface `error.message` and stop.
+     - `data.ok=true` means the upgrade command completed; continue unless `data.cli.scheduled=true`.
+     - `data.cli.scheduled=true` (Windows only) means the binary swap happens after the current process exits, so the new CLI is not active in this session yet. Tell the user to restart the session before generating.
+     - If `data.ok=true` and any plugin result has `warning`, mention it briefly only if useful for diagnostics. Do not treat warnings or `skipped_reason` as failures.
+   - If the user says no, continue only with the currently installed CLI version and do not suppress the hint.
+2. **Network approval gate (hard requirement).** Before launching the first networked `mediaio` process in the current task, submit that Shell/Bash tool call through the host's narrowest native network-only approval mechanism, scoped to the required destination when supported. Do not first run `mediaio account status`, `auth login`, discovery, upload, generation, or wait commands in the default sandbox as a connectivity probe. Approval metadata belongs to the host tool call, not to `mediaio` CLI arguments.
+3. Wait until the approval is accepted or automatically approved before launching the process. If network-only approval is unavailable, use a general out-of-sandbox approval only after reviewing its wider scope and presenting that approval to the user. If the command may write local state (including `auth login` persisting credentials), also request filesystem-write authorization; do not infer whether the target is inside the sandbox. If the host cannot request the required approval, report the host limitation and stop instead of attempting a known-to-fail sandboxed request. A global Codex permission-profile edit is not a prerequisite.
+4. Run `mediaio account status` using the approved execution path. If authentication is genuinely missing, expired or rejected by the server, run `mediaio auth login` and wait for the browser flow to finish. DNS, TLS, timeout, connection and sandbox-denial errors are network failures, not authentication failures.
+5. On a network or permission failure, load `references/troubleshooting.md`. Retry read-only commands only after a clear pre-connection sandbox/DNS failure; never automatically retry a write with an ambiguous result.
+6. Run `mediaio config get` when an endpoint or environment mismatch is suspected.
 
 ## UX Rules
 
-1. Be concise. No raw IDs, no JSON dumps in chat. Print the media URL for generated assets, or the text summary for Virality Predictor.
-2. No internal jargon. Don't narrate "calling mediaio cost", "polling job".
-3. Detect the user's language from the first message and reply in it. Technical args (`--aspect_ratio 16:9`) stay English.
-4. Don't batch-ask. Pick a sane default model and ask one thing at a time only if genuinely missing.
-5. Don't pre-estimate cost or optimize for cheaper models unless the user asks. Prefer the quality default first.
-6. Pass `--wait` to `generate create` so the command blocks until done and prints the result URL itself. Avoid the two-step `create` → `wait` pattern.
+1. Be concise. Do not paste raw registry output or full response payloads unless the user asks for diagnostics.
+2. When `mediaio version` surfaces an `Update:` line ending with `(update available)`, ask the user whether to run `mediaio upgrade --output json` before any generation workflow continues. The skill should not silently proceed past an update warning. Because the hint is throttled to once a day, never phrase its absence as a verified "already up to date".
+3. Do not expose access tokens, credentials, prompts from unrelated tasks, or request debug payloads.
+4. Don't batch-ask. Pick a sane default model from `references/model-catalog.md` and ask one thing at a time only if genuinely missing.
+5. Never invent a job type or parameter. Take the job type from the static catalog and the parameters from `model get`.
+6. Submit first, read the returned `task_id=<id>` line, then call `mediaio generate wait <task_id>`. The current `generate create` command does not accept `--wait`.
+7. Generation spends credits, but do not raise the subject on your own. Submit quietly, and surface the cost or ask for an approval only when the user is cost-sensitive. See the credit handling rules below.
+8. Send the user to the web app only through a link the CLI printed. Never compose, complete, or edit a media.io URL, and never name a payment step — see the product-page handoff rules below.
 
-## Discovery guardrail
+## Credit handling
 
-When looking for a Media.io feature/model, do not rely only on semantic search or CLI `--help`. First run an unfiltered model list, then inspect likely `job_set_type` names. If the user says a model exists but search returns no results, trust that signal and verify with the full model list before answering.
+`generate create` charges the user's Media.io credits. `--yes` is required on every submission because the CLI otherwise refuses to spend credits from a non-interactive host. By default the CLI prints no cost at all; `--show-credit` adds the estimate and the balance.
 
-Workflows are separate from models. Discover them with `mediaio workflow list` and inspect params with `mediaio workflow get <workflow_name>`.
+### Pick one of three modes
 
-Virality Predictor is exposed as:
+| Mode | Command | What the user sees |
+| --- | --- | --- |
+| **Quiet** (default) | `generate create ... --yes` | The result only. No cost, no confirmation turn. |
+| **Report** | `generate create ... --yes --show-credit` | The result plus what it cost. Still one turn. |
+| **Approve first** | `generate estimate ...` → ask → `generate create ... --yes --show-credit` | The price before anything is spent. |
 
-- Customer-facing name: Virality Predictor
-- Technical `job_set_type`: `brain_activity`
-- Category/output: text report. This is video-in/text-out analysis, not a text/chat generation model.
-- Input: uploaded video
-- Purpose: finished-video hook, attention, retention, and virality analysis
+Start in **Quiet**. Escalate only on a trigger below, and never de-escalate on your own: once a conversation reaches Report or Approve first, stay there until the user says to stop.
 
-If the user says "analyze this video", "score this ad", "evaluate the hook", or similar, route to `brain_activity` even though it appears under text/analysis models. Classify by task intent and required input, not by output category alone.
+### Quiet is the default
+
+The user asked for the job, so the request itself is the approval. Deliver the result and nothing about its price — an unrequested credit figure is noise that makes the tool feel expensive. Do not add a confirmation turn, do not run an estimate, and do not mention credits at all.
+
+### Escalate to Report
+
+Any one of these, in this turn or earlier in the conversation:
+
+- The user mentioned credits, cost, price, balance, or quota.
+- The user asked what a job cost, after it already ran.
+- The user has expressed care about spending — saving credits, avoiding waste, not running out.
+
+Report the number the command printed together with the result. One line is enough.
+
+### Escalate to Approve first
+
+Any one of these, which are about control rather than visibility:
+
+- The user asked to see the price, estimate, or quote **before** generating.
+- The user objected to an earlier charge, or asked you to check with them before spending.
+- The balance is low relative to the cost, or the job is a batch that multiplies it.
+
+Then run the full flow, which stops before spending anything:
+
+1. **Estimate.** After the parameters are final and any source media is uploaded, run the estimate with the exact job type and parameters you are about to submit:
+
+   ```bash
+   mediaio generate estimate <job_type> [--param value]...
+   ```
+
+   The estimate spends nothing. It reports `credit`, `known`, `rule_type`, the billed `fields`, and the account `balance`.
+
+2. **Ask.** Tell the user the job type, the estimated cost, their remaining balance, and that the actual charge is resolved server-side and may be lower. Then ask for approval and **end your turn**. Do not chain the submission into the same turn.
+
+3. **Wait for a real answer.** Only a fresh, explicit user message approving this specific job counts. None of the following is approval:
+
+   - the host running in an auto-approve / YOLO mode
+   - a shell-command permission prompt the host approved on your behalf
+   - your own reasoning that the cost is small
+
+   If the host cannot surface an interactive question to the user, do not submit. Report that the job is ready and is waiting for the user's credit approval.
+
+4. **Submit after the approval.** Use `--yes --show-credit`. Optionally add `--expect-credit <N>` with the number the user approved; the CLI then re-checks the cost and aborts if the parameters drifted. Use it when the cost is large or the parameters were assembled over several steps.
+
+5. If `generate create` aborts with an `--expect-credit` mismatch, re-run the estimate, show the new number, and ask again. Do not "fix" a mismatch by changing the number yourself.
+
+6. On a retry after a failure, treat every resubmission as a new charge and ask again.
+
+### When the balance runs short
+
+`generate estimate`, a `--show-credit` submission, and `account status` already print a `get credits:` / `get more:` line with a ready-made link whenever the balance cannot cover the job. **Reuse that line verbatim.** If you do not have one — for example a submission was rejected for insufficient credits before any cost was printed — ask the CLI for it:
+
+```bash
+mediaio link get credits
+```
+
+Then say, in one short line, what the balance is and hand over the printed `url` unchanged, so the user can pick up or add credits and come back. Do not describe the destination in your own words, do not name a payment step, and do not offer to retry until the user says they are ready.
+
+Never type a media.io URL from memory and never edit one you were given: the destination and its tracking parameters are owned by the binary and can change without a skill update. See the product-page handoff rules below.
+
+### Insufficient permission or credits — membership-aware fallback
+
+Trigger: `generate estimate`, a `--show-credit` submission, or `generate create` is rejected because the model requires a membership tier the account does not have, or the balance cannot cover the job.
+
+1. Check the account's membership tier: `mediaio account status` prints a `level:` line (`free` / `standard` / `premium`). `free` means the account is not a paying member.
+2. Build your suggestion around that tier — both branches require the user's explicit go-ahead before you act, and both mention the same two options, just in a different order and with different detail:
+   - **Non-member (`free`)** — lead with the downgrade. Name the specific fallback `job_type` for this job from the fallback chain in [references/model-catalog.md](references/model-catalog.md) (section 4), so the user knows exactly what they'd get. Mention getting more credits second, with the `get credits:` link.
+   - **Member (`standard`/`premium`)** — lead with getting more credits (the `get credits:` link). Mention that an alternative/cheaper model is also an option second, but do not name a specific `job_type` — members do not need to be steered toward the downgraded tier by name.
+3. Wait for an explicit yes before doing anything. If the user picks the fallback model, re-run `generate estimate` for the new `job_type` (its cost differs) and confirm again per the normal credit rules before submitting. If the user says they'll top up credits instead, stop and wait — do not resubmit on your own once the balance changes; let them tell you they're ready.
+4. Never switch models or resubmit without a fresh explicit confirmation, regardless of tier.
+
+### Other credit rules
+
+- **Never use `--skip-estimate`.** It is for interactive human terminals only and disables the tamper check.
+- Never widen spending permissions on your own initiative. `mediaio generate auto-confirm on` makes every later session spend without asking; only run it when the user asks for that in their own words, and say plainly that `auto-confirm off` reverts it. Never run it to work around a blocked job or a `confirmation required` error. `mediaio generate auto-confirm status` shows what is in effect.
+- When the user asks you to stop checking on cost, drop to Report: keep `--show-credit` and keep saying what each job cost, but stop asking first.
+
+## Product-page handoff
+
+The CLI generates; the Media.io web app is where the user browses, organises, and manages what they already have. There are exactly two links, and both come from the CLI:
+
+| The user wants to | Command |
+| --- | --- |
+| Pick up or add credits, because the balance cannot cover the job | `mediaio link get credits` |
+| See more of their history than `generate list` shows, manage past tasks, manage uploaded files or generated assets, or anything else the CLI does not implement | `mediaio link get home` |
+
+`mediaio link list` prints both destinations as `purpose`, `title`, `url` columns.
+
+Rules:
+
+1. **Never write a media.io URL yourself**, and never rewrite, shorten, or strip parameters from one the CLI printed. The path and its tracking parameters live in the binary precisely so they can change without touching this skill.
+2. Answer with the CLI first when the CLI can answer: `mediaio generate list` covers "what did I run recently", `mediaio upload list` covers "what have I uploaded". Offer the product page for the full history, previews, and management on top of that.
+3. Hand over one link with one line of context. Do not paste both links at once.
+
+## Result URL guardrail (hard rule)
+
+A signed Media.io result URL carries a high-entropy storage credential. Rewriting one character breaks it, and the storage service answers `InvalidAccessKeyId` or `SignatureDoesNotMatch` rather than pointing at the typo. Therefore:
+
+1. **Never retype, re-key, summarise, reformat, or hand-edit a result URL.** Do not strip or add query parameters such as `x-oss-process`, and do not "clean up" the URL for readability.
+2. **Prefer `mediaio generate download`.** It resolves the task and fetches the file itself, so the download never depends on you reproducing a signed URL. It echoes the source URL on a `# url[N] <url>` comment line for reference; copy that line verbatim if the user asks for the link.
+3. If a raw URL is genuinely required, capture it with the shell instead of copying it. The default brief output prints each result URL flush-left on its own line, so it can be captured verbatim:
+
+   ```bash
+   url=$(mediaio generate query <job_type> <task_id> | grep '^http' | head -1)
+   ```
+
+4. If a download fails with a storage credential error, do not attempt to correct the URL. Re-run `mediaio generate download <task_id>` (or `generate query`) to obtain a fresh signature.
+
+## Output modes
+
+**Do not pass `--output`.** Every `generate` subcommand defaults to `brief`, which is the only mode you should read:
+
+| Command | Default brief output |
+| --- | --- |
+| `generate create` | `uni_fun_code=<job_type>` and `task_id=<id>` lines |
+| `generate wait` / `generate query` (success) | `task_id=`, `uni_fun_code=`, `algorithm_name=`, `module=`, `status=`, `status_code=`, `files=` lines, then `# ...` metadata comments and one bare result URL per line |
+| `generate wait` / `generate query` (failure) | `status=`, `status_code=`, `reason_code=`, `reason_label=`, `reason=` lines |
+| `generate list` | one tab-separated row per task (`task_id`, `status`, `uni_fun_code`, `algorithm_name`, `module`, `begin`, `end`), no URLs |
+| `generate estimate` | `job type:`, `estimate:`, `free:`, `balance:`, `note:` lines, plus a `get credits:` line when the balance is short |
+| `link get` / `link list` | `purpose:`, `title:`, `url:` lines / one tab-separated `purpose`, `title`, `url` row per destination |
+| `generate download` | one local file path per non-comment line, preceded by a `# uni_fun_code <code>` line and per-file `# file[N] ...` metadata and `# url[N] <url>` lines |
+
+`uni_fun_code` is the only field that identifies which model produced a task. The raw `algorithm` field is `combo_alg` for every workflow task, so it is omitted from brief output unless it holds a real value (`tts`, `agent2mv`, ...). Likewise `generate list --algorithm` filters by algorithm channel, not by model.
+
+## Discovery guardrail — static catalog first
+
+`references/model-catalog.md` is a generated snapshot of the production registry. **It is the default source for model selection. Do not run `mediaio model list` for routine routing.**
+
+### Default path (no `model list`)
+
+1. Read `references/model-catalog.md`.
+2. Pick the `job_type` from its section 3 routing table — match top-down and **stop at the first hit**. If the user gave no source image, use the text-to-image table; if they attached one, use the image-to-image table.
+3. Some image-to-image rows are conditioned on membership tier. When you reach one, use the `level:` value already printed by the `mediaio account status` you ran in the startup sequence — do not run an extra command for it, and treat a missing or unrecognised `level` as "not a member". Pure text-to-image has a single ToMoviee tier, so membership never changes that pick.
+4. Run `mediaio model get <job_type>` for the parameter schema. This is a required pre-submission step, not a discovery step: the catalog never promises parameters, and you must not infer them from it.
+5. Continue with the normal upload / estimate / submit / wait flow.
+
+### When you may fall back to `model list`
+
+Only these cases. Nothing else qualifies.
+
+| Trigger | Action |
+| --- | --- |
+| The model the user named is not in catalog sections 2 or 5 | `mediaio model list --grep <keyword> --output json` |
+| A submission returned `unknown job type` | Full `model list`, reselect, and tell the user the catalog may be stale |
+| The user explicitly asks to see all/latest models, or whether something new exists | Full `model list`, grouped by type/module |
+| You are about to degrade and need to confirm the fallback is still live | `mediaio model list --grep` on the fallback `job_type` |
+| The catalog's `generated_at` is more than 30 days old, or its `catalog_schema_version` is not 1 | Full `model list`, and report that the catalog needs re-syncing. **This check is local — do not issue a request to test freshness** |
+| `references/model-catalog.md` is missing or its metadata table is corrupt | Fall back to pure runtime discovery |
+
+These are **not** reasons to call `model list`: routine intent routing, picking the default model, "let me just double-check", uncertainty about parameters (that is `model get`), or a `job_type` that looks misspelled.
+
+### Identifier rules (hard requirements)
+
+1. **Copy `job_type` byte for byte.** Never trim it, change its case, or "fix" a name that looks wrong. Six production job types contain a literal space, for example `image2video_seedance _2.5`. Quote them in the shell: `mediaio model get "image2video_seedance _2.5"`.
+2. **Map display name → `job_type` only, never the reverse.** Display names are frequently unrelated to the identifier: `image2image_banana_2` is *Nano Banana Pro*, while *Nano Banana 2* is `image2image_nano_banana_2`. Look the name up in catalog section 5; do not assemble an identifier from what the user said.
+3. **Display names are not unique** — 37 groups collide. When a name matches several `job_type` values, list the candidates and let the user choose.
+4. **ToMoviee is the first-party model family; its Chinese name is 天幕.** No model's display name is literally 天幕, so a user asking for 天幕 must be resolved to the ToMoviee entries in catalog section 6.5. Treat 天幕 and ToMoviee as the same request.
+5. **Echo both when you report your choice**: `Display Name (job_type)`.
+6. The catalog's permission tier column is a manual annotation. Never promise the user a model is free based on it; the cost comes from `generate estimate`.
+
+### Workflows and effects
+
+Workflows and effects are separate discovery views not covered by the static catalog, but they are submitted through the same command: `mediaio generate create <job_type> ...`. Use `mediaio workflow list` / `mediaio effect list` for them. The current CLI has no `effect get`; never guess effect parameters from the list summary.
+
+`mediaio model get <job_type>` marks parameters as `[workflow-default]` when the workflow supplies a value if the flag is omitted.
 
 ## Workflow — generic generation
 
-1. **Pick a model.** Start with the core defaults unless the brief clearly needs a specialist:
+1. **Select.** For models, read `references/model-catalog.md` and take the `job_type` from its routing table — see the discovery guardrail above. Run a list command only for a workflow/effect, or when one of the fallback triggers applies:
 
-   - **GPT Image 2** → default image model for high-fidelity general generation, graphic design, UI, banners, typography, and on-image text.
-   - **Seedance 2.0** → default video model for serious motion, cinematic clips, multi-shot work, image-to-video, and 4–15s production-quality output up to 4K. 12s is valid.
-   - **Nano Banana 2/Lite/Pro** → default for character, cartoon, stylized, and reference-driven image work; use Lite for speed/cost, Pro for harder briefs.
-   - **Marketing Studio** → default for ads, UGC, product demos, unboxing, TV spots, presenter videos, and brand/product workflows.
-   - **Seed Audio 1.0** → default audio model for text-to-audio, voice, sound effects, ambience, foley, and music-like audio unless the user names Sonilo/Mirelo.
-
-   **Image:**
-   - Brand product visual (Pinterest pin, lifestyle, hero banner, ad pack, virtual try-on) → use `mediaio-product-photoshoot` instead. NOT this skill.
-   - Generated product concept / packaging / can / bottle with brand name or label text → GPT Image 2.
-   - Branded ad image with avatar + product (Marketing Studio shape) → Marketing Studio Image (see Marketing Studio below)
-   - Aesthetic UGC / fashion editorial / lifestyle character → Soul 2.0
-   - Cinematic still frame → Soul Cinema
-   - Highly characterful creative persona (text-only, distinctive) → Soul Cast
-   - Locations / environments / no-people scenes → Soul Location (best in class)
-   - Logo, icon, vector-like illustration, brand mark, controlled-palette graphic → Recraft V4.1 (`recraft_v4_1`, often with `--model_type vector`)
-   - Face edit + complex scene swap → Seedream 4.5
-   - Soul Character (reference id from `mediaio-soul-id`) → Soul 2.0 for stills, Soul Cinema for cinematic
-   - Character or cartoon-style work → Nano Banana 2; use Nano Banana 2 Lite (`nano_banana_2_lite`) for fast/simple reference edits, step up to Nano Banana Pro on hard cases
-   - Fast and cheap iteration → Z Image
-   - **Default for everything else → GPT Image 2.** Graphic design, UI, banners, typography, and high-fidelity general generation.
-
-   **Video:**
-   - Complete narrated explainer from a topic, story, or document → use `mediaio-video-explainer`, not generic video generation.
-   - All advertising / commercial / branded ad video → Marketing Studio (see Marketing Studio below)
-   - Edit existing video from sketch/timestamp, or reframe to another aspect ratio → workflow (`draw_to_video` or `reframe`), not a model. See `references/workflows.md`.
-   - **Default all-purpose serious video (multi-shot, consistent identity, motion-heavy, image-to-video, 4–15s requests) → Seedance 2.0.** SOTA. Do not downgrade to Seedance 1.5 just because its duration enum is easier to read; validate Seedance 2.0 first.
-   - Single-plane scene without strong dynamics, cheaper than Seedance 2.0 → Kling 3.0; if the user explicitly asks for Turbo, faster, or lower-cost Kling output → Kling 3.0 Turbo (`kling3_0_turbo`)
-   - Cheap clean shot without cuts, only when the user asks for cheaper/budget output → Seedance 1.5 Pro
-   - Cinema-grade highest fidelity → Cinema Studio Video 3.0
-   - Cheap with strong physics, no audio needed → Minimax Hailuo
-   - Fast batch / volume → Veo 3.1 Lite
-   - Bold/stylized image-to-video from a required start image → Grok Video 1.5 (`grok_video_v15`). Requires one `--start-image` or `--image`, duration 2–15s, resolution `480p` or `720p`.
-   - Multimodal reference-to-video with up to 7 images or one video reference → Gemini Omni Flash (`gemini_omni`); keep Seedance 2.0 as the default serious-video pick.
-
-   **Video analysis:**
-   - Rate a finished video's hook, virality potential, attention, retention, or distraction risk → Virality Predictor (`brain_activity`). This is a video analysis model that returns a text score/report, not a generated media asset.
-
-   **3D:**
-   - A 3D asset within a playable game or game-wide asset system → use `mediaio-game-generation`.
-   - Create an actual 3D mesh/model/GLB from one or more object/product reference images → Multi-Image to 3D (`multi_image_to_3d`). Pass 1–4 images with repeated `--image`; use `--should_texture true` when the asset needs texture. If the user only asks for a 3D-rendered picture, use an image model instead.
-
-   **Audio:**
-   - **Default for audio generation → Seed Audio 1.0 (`seed_audio`).** Use for text-to-audio, sound effects, ambience, foley, impacts, environmental audio, voice-style generations, and music-like audio. It requires `--prompt`; use optional `--audio-references`/`--image-references` only when the user provides references.
-   - Use Sonilo Music (`sonilo_music`) only when the user explicitly asks for Sonilo or you need that specialist music model. It requires `--prompt` and `--duration`, and returns audio.
-   - Use Mirelo Text to Audio (`mirelo_text_to_audio`) only when the user explicitly asks for Mirelo or you need that legacy SFX model. It requires `--prompt` and `--duration`, and returns audio.
-
-   For the actual `--model` ID to pass to `mediaio generate create`, run `mediaio model list --json | jq` to map display names to IDs. See `references/model-catalog.md` for the full table.
-
-2. **Pass media inputs straight to flags.** Media flags accept a local file path **or** a UUID. CLI auto-uploads paths and auto-detects job vs upload for UUIDs. No need to pre-upload. Each model declares accepted media roles or `*_references` params — see `references/media-inputs.md`.
-3. **Validate quickly.** If unsure of params, run `mediaio model get <jst> --json` once and pass only what's needed. Validate the preferred model before falling back to an older one. Use schema defaults otherwise. The server returns `adjustments` for non-fatal coercions (e.g. `aspect_ratio=99:99` → closest match) and a structured error for invalid declared-param values.
-4. **Submit and wait in one shot.** `mediaio generate create <jst> [--prompt "..."] [media flags] [param flags] --wait`. Blocks until terminal status and prints the result on stdout. Tunables: `--wait-timeout 20m` (default 10m), `--wait-interval 5s` (default 3s). Virality Predictor does not need a prompt; pass `--video`.
-5. **Deliver.** For generated media and 3D assets, send the primary result URL plus a one-line summary (model, duration if video; GLB/asset URL for 3D). For Virality Predictor, deliver the scores, business interpretation, and the Open report link. Do not surface Virality Predictor `.glb`, `.bin`, or region-table internals in normal chat output.
-
-To inspect or rerun later, `mediaio generate list --json` and `mediaio generate get <id> --json` work for retrospection. `mediaio generate wait <id>` is still available if you ever need to rejoin a job started without `--wait`.
-
-For workflow jobs, use `mediaio generate workflow <workflow_name> ... --wait`. Cost syntax is `mediaio generate cost workflow <workflow_name> ...`. See `references/workflows.md`.
-
-## Media flags
-
-| Flag | Purpose | Models that accept it |
-|---|---|---|
-| `--image <path-or-id>` | reference image | most image models, `grok_video_v15`, `multi_image_to_3d`, `seedance_2_0`, `veo3`, `marketing_studio_video` |
-| `--start-image <path-or-id>` | first frame for image-to-video transitions | `grok_video_v15`, `kling3_0`, `kling3_0_turbo`, `kling2_6`, `veo3_1`, `seedance_2_0`, `marketing_studio_video` |
-| `--end-image <path-or-id>` | last frame for transitions | `kling3_0`, `seedance_2_0`, `marketing_studio_video` |
-| `--video <path-or-id>` | reference or analyzed video | `seedance_2_0`, `brain_activity` |
-| `--audio <path-or-id>` | reference audio (lipsync, soundtrack match) | `seedance_2_0` (use this, NOT `--generate-audio`) |
-
-For reference-array models, the explicit flags are `--image-references`, `--video-references`, and `--audio-references`; `--image`, `--video`, and `--audio` are short aliases when the schema exposes those params.
-
-Each flag accepts either a local file path (auto-uploaded) or a UUID (upload id from `mediaio upload create`, or a previous job id). Each model declares its own media roles or `*_references` params. See `references/media-inputs.md` for the full table.
-
-## Common params
-
-Flags pass through to model schema. Use `mediaio model get <jst>` to discover.
-
-```bash
-mediaio generate create gpt_image_2 --prompt "neon city at dusk" --aspect_ratio 16:9 --resolution 2k --wait
-mediaio generate create nano_banana_2 --prompt "anime character concept, expressive pose" --image ./ref.png --wait
-mediaio generate create seedance_2_0 --prompt "camera dollies in" --start-image ./first.png --duration 12 --resolution 4k --wait
-mediaio generate create grok_video_v15 --prompt "cinematic handheld shot, neon rainy street" --start-image ./image.png --duration 5 --resolution 720p --wait
-mediaio generate create text2image_soul_v2 --prompt "..." --soul-id <soul_ref_id> --quality 2k --wait
-mediaio generate create multi_image_to_3d --image ./front.png --image ./side.png --should_texture true --wait
-mediaio generate create seed_audio --prompt "cinematic rain ambience with distant thunder" --wait
-mediaio generate create sonilo_music --prompt "cinematic synthwave track" --duration 12 --wait
-mediaio generate create mirelo_text_to_audio --prompt "glass breaking in a large hall" --duration 4 --wait
-mediaio generate create brain_activity --video ./ad.mp4 --wait
-```
-
-For machine-readable output (chained pipelines, agent context), add `--json`. With `--wait --json` you get the final job object array. Without `--wait`, you get the job IDs. Virality Predictor stores raw analysis and render artifacts in the job params, but the default text output should stay to scores plus Open report.
-
-Stdin prompt: `echo "..." | mediaio generate create z_image --wait`.
-
-Soul image quality: for `text2image_soul_v2` and `soul_cinematic`, pass `--quality 1.5k` or `--quality 2k`. These are UI-facing tiers; the backend maps them to `720p`/`1080p` and model-specific dimensions from the selected `--aspect_ratio`. `soul_location` has no quality selector; it uses fixed dimensions per aspect ratio.
-
-## Marketing Studio
-
-Branded image/video gen: avatars + products + optional setup hooks/settings + ad-style modes. Use models `marketing_studio_video` and `marketing_studio_image`.
-
-### Concepts
-
-- **Avatar** — presenter face. Curated `preset` (browse `mediaio marketing-studio avatars list`) or `custom` (uploaded photos via `mediaio marketing-studio avatars create`). For UGC modes, an avatar is optional if the brief clearly mentions a person; the backend can create a Soul Character automatically. Pass an avatar when the user wants a specific presenter.
-- **Product** — brand item with title + reference images. Imported from URL (`mediaio marketing-studio products fetch --url ...`) or created from uploaded images (`mediaio marketing-studio products create`).
-- **Webproduct** — App Store / web page version. Auto-routes when fetching App Store URLs.
-- **Hook** — reusable opening angle / ad hook. Browse with `mediaio marketing-studio hooks list`. Hook text is prepended to the user's prompt; it does not replace `--prompt`.
-- **Setting** — reusable environment / scene context. Browse with `mediaio marketing-studio settings list`.
-- **Ad reference** — reusable inspiration video that can be bound to an avatar and/or product. Created from an uploaded video (`--video-input <upload_id>`) or a previous generation job (`--job <job_id>`). Browse with `mediaio marketing-studio ad-references list`. See `references/marketing-ad-references.md`.
-- **Brand kit** — captures a brand's identity (name, logo, hero images, colours, fonts, tone) for reuse across image generations. Created by handing in a website URL (`mediaio marketing-studio brand-kits fetch --url https://… --wait`). See `references/marketing-brand-kits.md`.
-- **Ad format** — presets that drives the visual structure of a generated image (`headline`, `bullet-points`, etc.). Read-only, browse with `mediaio marketing-studio ad-formats list`. Required input for `dtc-ads generate`.
-
-### Discovery commands
-
-Use these exact list commands when the user asks what already exists:
-
-```bash
-mediaio marketing-studio avatars list --json
-mediaio marketing-studio products list --json
-mediaio marketing-studio hooks list --json
-mediaio marketing-studio settings list --json
-mediaio marketing-studio ad-references list --json
-mediaio marketing-studio brand-kits list --json
-mediaio marketing-studio ad-formats list --json
-```
-
-`--hook_id` and `--setting_id` are supported by `marketing_studio_video` only; do not pass them to `marketing_studio_image`.
-
-### UX rules (additional)
-
-- One question per phase. Don't ask product+avatar+mode upfront.
-- **Two ad approaches are mutually exclusive.** Either the user gives an ad reference video (reference-driven) **or** picks hook/setting blocks (composed-from-blocks) — never both. If the user has an ad reference selected, do not offer hook/setting; if hook/setting are picked, do not offer to attach an ad reference.
-- **Ad reference source.** The only valid inputs are a local video file (uploaded via `mediaio upload create ... --video`) or a prior video job. If the user provides anything else, ask for a local file.
-- **`dtc-ads` ad format is mandatory.** Always ask the user to pick from `ad-formats list`. There is no auto-default — both the CLI and server reject calls without `--format-id`.
-- **`dtc-ads` optional inputs.** Suggest avatars, products, and reference media when the brief calls for them; only attach what the user picks.
-
-### Workflow — quick ad video
-
-1. **Get product.**
-   - Existing product → `mediaio marketing-studio products list --json`
-   - URL → `mediaio marketing-studio products fetch --url <url> --wait` (polls until import done)
-   - Local images → `mediaio upload create <photo>...` then `mediaio marketing-studio products create --title "..." --image <id>...`
-   Capture product id. When using `--hook_id`, strongly prefer passing `--product_ids`; hooks are designed to pivot into a product and work poorly without product context.
-2. **Pick avatar if needed.**
-   - Default: `mediaio marketing-studio avatars list` and pick a preset matching the brand voice.
-   - Custom: `mediaio marketing-studio avatars create --name "..." --image <upload_id>`.
-   For UGC modes, you may omit `--avatars` when no specific presenter is required and the brief mentions a person; the backend can synthesize a Soul Character.
-3. **Optionally pick setup items.**
-   - Hook: `mediaio marketing-studio hooks list --json`
-   - Setting: `mediaio marketing-studio settings list --json`
-   Pass selected IDs as `--hook_id <hook_id>` and `--setting_id <setting_id>` for `marketing_studio_video` only. Do not copy the hook's prompt into `--prompt` unless the user explicitly wants to reinforce the same wording.
-4. **Pick mode if needed.** Default is `ugc`; `--mode` is not required just because `--hook_id` is present. Other current slugs: `ugc_how_to`, `ugc_unboxing`, `product_showcase`, `product_review`, `tv_spot`, `wild_card`, `ugc_virtual_try_on`, `virtual_try_on`. **Hook/setting are valid only for `ugc`, `ugc_how_to`, `ugc_unboxing`, `product_review`, `ugc_virtual_try_on`** — do not pass `--hook_id` / `--setting_id` with the other modes. See `references/marketing-modes.md`.
-5. **Generate (one-shot).**
    ```bash
-   PRODUCT_IDS_JSON=$(mktemp)
-   AVATARS_JSON=$(mktemp)
-   printf '["<product_id>"]' > "$PRODUCT_IDS_JSON"
-   printf '[{"id":"<avatar_id>","type":"preset"}]' > "$AVATARS_JSON"
-
-   mediaio generate create marketing_studio_video \
-     --prompt "..." \
-     --avatars @"$AVATARS_JSON" \
-     --product_ids @"$PRODUCT_IDS_JSON" \
-     --mode ugc \
-     --duration 15 \
-     --resolution 720p \
-     --aspect_ratio 9:16 \
-     --wait
+   mediaio workflow list
+   mediaio effect list
+   mediaio model list --grep <keyword> --output json   # only on a listed trigger
    ```
-   Add `--hook_id <hook_id>` and/or `--setting_id <setting_id>` when a setup hook/setting was selected.
-   `product_ids` and `avatars` are JSON arrays; pass them via `@/path/to/file.json`. Do not pass a bare UUID to `--product_ids`.
-   Resolution is `480p` or `720p`. Aspect ratio is one of `auto`/`21:9`/`16:9`/`4:3`/`1:1`/`3:4`/`9:16`. `--generate-audio true` is supported here (unlike `seedance_2_0`). `--wait` blocks until done; bump `--wait-timeout 30m` for longer ad runs.
-6. **Deliver.** URL + one-line summary (mode, duration).
 
-### Click-to-Ad shortcut (URL-driven)
+2. **Inspect.** Use the exact identifier, copied verbatim (quote it if it contains a space):
 
-When the user gives a product URL and wants a marketing video in one go:
+   ```bash
+   mediaio model get <job_type>
+   mediaio workflow get <workflow_name>
+   ```
+
+   For an effect, stop if its required parameters have not already been verified from current BIN/service evidence; `effect list` alone is not a parameter schema.
+
+3. **Prepare local media and check file access.** The current generator does not auto-upload local paths. Before reading or uploading each user-provided path:
+
+   - **Confirm the job actually needs source media, then confirm the user supplied it.** Job types named like `image2image_*`, `image2video_*`, `img2vid_*`, `*_i2i`, `*_i2v`, or `reference2video_*`, and any job whose `model get`/`workflow get` output lists an image/video/reference parameter, need at least one uploaded source file — even when the live schema does not mark that parameter `required`. If the user has not attached or referenced a local file or an existing `file_id` for such a job type, stop before `generate create` and ask the user to provide the source image/video first. Do not submit the job and then rely on the server's error to tell you a source was missing; see `references/troubleshooting.md` for the failure signature.
+   - Resolve relative paths against the current working directory without following an untrusted path blindly, and determine whether the resolved file is inside the active workspace.
+   - For a path inside the workspace, continue with the normal host file-read rules.
+   - For a path outside the workspace, pause and request the host's native file-read authorization for the exact file (or the smallest explicit set of files). State the paths and that they will be uploaded to Media.io. Do not launch `mediaio upload create` until that authorization is accepted.
+   - If the host cannot provide file-read authorization, stop and ask the user to grant access or move/copy the file into the workspace. Never bypass this by broadening access silently.
+
+   After the required file authorization and network approval are available, upload each local file first, save the returned `file_id`, then pass that ID using the exact parameter name shown by `model get` or `workflow get`:
+
+   ```bash
+   mediaio upload create ./reference.png
+   ```
+
+4. **Pick the credit mode.** Apply the credit handling rules above: stay Quiet unless the conversation has already triggered Report (add `--show-credit` to the submission below) or Approve first (estimate and stop for an answer before submitting).
+
+5. **Submit.** Pass only parameters exposed by the live schema, plus `--yes`:
+
+   ```bash
+   mediaio generate create <job_type> [--param value]... --yes
+   ```
+
+   Do not mention the cost when you deliver the result unless `--show-credit` was warranted.
+
+6. **Wait.** Read the `task_id=<id>` line printed by the create command, then run:
+
+   ```bash
+   mediaio generate wait <task_id> --timeout 20m --interval 3s
+   ```
+
+   When the deliverable is a local file, let the CLI do the download in the same step and skip URL handling entirely:
+
+   ```bash
+   mediaio generate wait <task_id> --timeout 20m --download "$(mktemp -d)"
+   ```
+
+7. **Deliver.** Retrieve every result file with the CLI, never by re-entering, re-fetching, or hand-copying a URL. Do not run `curl`/`wget`/a browser against a result URL yourself, even to "double check" it — that is exactly how a 430-510 character signed URL gets corrupted. If a fetch fails, re-run `generate download`/`generate query` for a fresh signature instead of retrying your own copy of the URL.
+
+   1. Create a writable temporary directory with `mktemp -d`.
+   2. Download the task's results into it:
+
+      ```bash
+      mediaio generate download <task_id> --output-dir "$tmp_dir"
+      ```
+
+      Every non-comment line is a local path; each file is preceded by a `# file[N] ...` metadata line and a `# url[N] <url>` line carrying the source URL. Use `grep -v '^#'` to keep only the paths. Omit `--index` so every result file is downloaded — a task can produce more than one. Use `--index N` only when the user explicitly wants a single specific result, and `--variant preview` only when they explicitly want the compressed preview instead of the full-resolution file. `--variant original` is the default and is what you should normally deliver.
+   3. For **each** downloaded path (not just the first), require a non-empty file, then inspect it with `file --brief --mime-type "$download_path"`. Continue with the image path only for `image/*`. If the CLI-provided filename already carries an accurate extension, keep it; otherwise derive one from common MIME types (`image/png` → `png`, `image/jpeg` → `jpg`, `image/webp` → `webp`, `image/gif` → `gif`). Never label an unknown image as PNG.
+   4. Deliver **every** verified file back to the host as its own local-path Markdown image, in the same order `generate download` printed them, using the standard syntax `![preview](<local-path>)`. A task with N result files means N images in the reply — never stop after the first one. When a local path contains spaces, parentheses, or non-ASCII characters, wrap the target in angle brackets. Prefer the local downloaded file over the remote HTTPS URL.
+   5. Report completion only after providing the local Markdown image snippet, or after establishing that local-path Markdown cannot be used in the current host. In the latter case, explicitly say inline local preview is unavailable, and reuse the `# url[N]` line printed by `generate download` (or the shell capture shown in the result URL guardrail) rather than transcribing the URL.
+   6. Do not remove the temporary directory before the final response is sent, because the host may resolve the local Markdown path when rendering the reply.
+   7. `curl` is a fallback only when `generate download` is unavailable in the installed build. In that case still capture the URL into a shell variable and pass `"$url"` unmodified:
+
+      ```bash
+      curl --fail --location --retry 2 \
+        --connect-timeout 15 --max-time 120 \
+        --output "$download_path" "$url"
+      ```
+
+   For video, audio, 3D, or other non-image outputs, download the file the same way and give the user its local path; provide the result URL only when the host cannot accept a local file.
+
+
+## Verified image generation
+
+For text-only GPT Image 2, current discovery exposes `text2image_gpt_image_2` with `--prompt`, `--n`, `--quality`, `--model`, `--size`, and `--output_format`.
 
 ```bash
-# 1. Trigger fetch (returns the product id, import runs in the background)
-mediaio marketing-studio products fetch --url https://shop.example.com/sneakers --wait
-
-# 2. Generate the marketing video against the same URL — backend reuses the entity
-mediaio generate create marketing_studio_video \
-  --url https://shop.example.com/sneakers \
-  --mode ugc \
-  --duration 15 \
-  --aspect_ratio 9:16 \
-  --wait
+mediaio model get text2image_gpt_image_2
+mediaio generate create text2image_gpt_image_2 \
+  --prompt "a warm, photorealistic portrait of a golden retriever at sunset" \
+  --quality high \
+  --size 1024x1024 \
+  --output_format png \
+  --yes
 ```
 
-Backend dedupes by URL, so repeated runs reuse the existing entity instead of re-fetching.
+Do not replace this with the legacy short name `gpt_image_2`; it is not the current registry key. Do not append `--wait` to the create command. When the user is cost-sensitive, add `--show-credit` so the cost is printed, and price the job with `mediaio generate estimate` first if they want a say before spending.
 
-### Workflow — marketing image
+For image-to-image GPT Image 2, upload each source first and use the live repeated flag `--images <file_id>` with `image2image_gpt_image_2`.
 
-Same as above but use `marketing_studio_image` model:
+## Current capability boundary
 
-```bash
-mediaio generate create marketing_studio_image \
-  --prompt "..." \
-  --aspect_ratio 1:1 \
-  --resolution 2k \
-  --wait
-```
+Only the command families printed by the current `mediaio --help` output are executable, and only the `job_type` values present in `references/model-catalog.md` (or returned by live discovery) exist. The migrated reference set also describes surfaces that are not part of the current BIN:
 
-## Virality Predictor video scoring
-
-Use Virality Predictor (`brain_activity`) when the user wants to evaluate a finished video as a business creative: hook strength, virality potential, attention, retention, or how well the content/product holds focus and minimizes distraction. Treat "Virality Predictor" as the customer-facing feature name; `brain_activity` is only the CLI/job_set_type.
-
-```bash
-mediaio generate create brain_activity --video ./creative.mp4 --wait
-```
-
-The result is text, not a generated image/video. Report the overall score, peak hook second, sustain score, strongest/weakest regions, and report URL if present. Interpret it as an objective attention proxy for creative testing: higher Visual/Auditory/Language/Attention scores suggest stronger stimulus and focus; lower Default Mode is better because it suggests less mind-wandering.
-
-The CLI prints an Open report URL like `https://<app-domain>/apps/virality-predictor?resultJobId=<job_id>`. Send that URL for the visual report. Raw artifact URLs such as `brain_example_url`, `vertexMapBinaryUrl`, and `vertexMapUrl` are implementation details; mention them only when the user asks for raw data or implementation details.
-
-Good final shape:
-
-```text
-Overall score: 44/100
-Peak hook: 49% at 1s
-Sustain: 89%
-Strongest region: Visual Cortex
-Risk: Default Mode is high, which can indicate mind-wandering.
-
-Open report: <report_url>
-```
+- workflow-specific create helpers
+- one-shot create-and-wait flags
+- automatic upload of local paths passed directly to generation parameters
+- 3D, audio, Virality Predictor, Soul ID, product-photoshoot, game-generation, or video-explainer routes — the production registry has no `fun_module` for these at all
 
 ## Errors
 
-- `Missing required params: prompt` → user gave no prompt; ask for it.
-- `Missing required params: medias` on `brain_activity` / Virality Predictor → pass exactly one video via `--video <path-or-id>`.
-- `Invalid values: aspect_ratio=99:99 (allowed: ...)` → bad enum; pick from allowed.
-- `Unknown params: foo` → schema doesn't accept that flag; check `mediaio model get <jst>`. If this happens for `hook_id` or `setting_id`, the selected model/job_set_type does not support Marketing Studio setup items.
-- `Session expired` → `mediaio auth login`.
-
-See `references/troubleshooting.md` for more.
+- `flag provided but not defined: -wait` → remove `--wait`, submit, then call `mediaio generate wait <task_id>`.
+- `credit confirmation required: rerun with --yes ...` → `--yes` was missing. Add it. If the user is cost-sensitive, add `--show-credit` too, and get their approval before resubmitting. Never satisfy this error with `--skip-estimate` or by turning on auto-confirm.
+- a submission or estimate rejected because the balance cannot cover the job, or because the model requires a membership tier the account does not have → do not retry and do not switch to a cheaper model on your own. Follow "Insufficient permission or credits — membership-aware fallback" above and wait for the user.
+- `credit estimate mismatch: --expect-credit X but the current parameters estimate to Y` → the parameters changed after the approval. Show Y to the user and ask again; never silently resubmit with Y.
+- `--skip-estimate is only allowed on an interactive terminal` → drop the flag so the cost is printed.
+- `--json is not supported; use --output json instead` or `flag provided but not defined: -json` → drop `--json`; you should not be passing an output flag at all.
+- `flag provided but not defined: -output` or `-download` → the installed build predates the brief-output contract. Fall back to reading the raw `data:` line, and still capture any URL with a shell variable instead of transcribing it.
+- `unknown job type` → most often the identifier was altered. Re-read it from `references/model-catalog.md` and copy it byte for byte; check section 6.1 in case it contains a space. Only if it is genuinely absent from the catalog, rerun the relevant live list and use its exact first-column identifier, and tell the user the catalog looks stale.
+- `missing required flag(s)` or `invalid value` → inspect the live schema and pass only exposed values.
+- `InvalidAccessKeyId`, `SignatureDoesNotMatch`, or an HTTP 403 from the storage host while downloading → the URL was altered or has expired. Do not try to repair it. Re-run `mediaio generate download <task_id>`.
+- `is not downloadable yet: status=...` → the task has not reached a successful terminal state; run `generate wait` first and read `reason_code`/`reason_label`.
+- `already exists; pass --overwrite to replace it` → choose a fresh `--output-dir` (for example a new `mktemp -d`) or pass `--overwrite` deliberately.
+- task is accepted but `generate wait` ends in a generic terminal failure → before retrying, check whether the job type needs a source image/video (name contains `image2image`/`image2video`/`img2vid`/`reference2video`, or `model get`/`workflow get` lists an image/video parameter). If no source file was uploaded and passed for such a job, ask the user for one and resubmit; do not blindly retry the identical command. See `references/troubleshooting.md` for the specific error signature.
+- endpoint `404` during create → verify the BIN build routes creation through the configured combo_alg endpoint; do not switch models because this is not a prompt/model-selection error.
+- missing credentials, an HTTP 401, or an explicit token-refresh rejection → run `mediaio auth login`.
 
 ## Reference docs
 
-Load on demand:
+Load references on demand:
 
-- `references/model-catalog.md` — picking the right model for the task
-- `references/workflows.md` — `draw_to_video` and `reframe` workflow generation
-- `references/prompt-engineering.md` — writing prompts that work
-- `references/media-inputs.md` — image/video/audio reference flows and Virality Predictor video analysis
-- `references/troubleshooting.md` — common errors and fixes
-- `references/marketing-avatars.md` — preset vs custom avatars
-- `references/marketing-products.md` — URL fetch vs manual product create
-- `references/marketing-setup-items.md` — hooks/settings discovery and usage
-- `references/marketing-ad-references.md` — ad reference videos (create/list/get)
-- `references/marketing-brand-kits.md` — brand kits (fetch from URL, list, get)
-- `references/marketing-dtc-ads.md` — DTC Ads Engine (`dtc-ads generate`)
-- `references/marketing-modes.md` — every Marketing Studio mode
+- `references/model-catalog.md` **before every model selection** — generated from the production registry; carries the defaults, routing rules, fallback chain, the full model index, and the known identifier traps
+- `references/prompt-engineering.md` for prompt-writing guidance
+- `references/media-inputs.md` when the user provides local or uploaded media
+- `references/workflows.md` for a job type returned by live workflow discovery
+- `references/troubleshooting.md` after a current command fails
