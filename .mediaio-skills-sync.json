@@ -2,8 +2,8 @@
   "schema_version": 1,
   "source_repository": "media-plugin-main",
   "source_directory": "skills",
-  "source_commit": "c27407697a36234c41390829919b2c4eef3921aa",
-  "source_version": "0.5.0",
+  "source_commit": "d05797a3f8ec3e696d91f0090494569c5bd89105",
+  "source_version": "0.5.1",
   "managed_skill_names": [
     "mediaio-generate"
   ]
